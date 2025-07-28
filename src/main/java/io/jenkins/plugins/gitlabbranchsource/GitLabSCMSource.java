@@ -117,6 +117,7 @@ public class GitLabSCMSource extends AbstractGitSCMSource {
     private String httpRemote;
     private transient Project gitlabProject;
     private Long projectId;
+    private Long lastRetrieveTimestamp;
 
     /**
      * The cache of {@link ObjectMetadataAction} instances for each open MR.
@@ -164,6 +165,14 @@ public class GitLabSCMSource extends AbstractGitSCMSource {
 
     public void setSshRemote(String sshRemote) {
         this.sshRemote = sshRemote;
+    }
+
+    public Long getLastRetrieveTimestamp() {
+        return lastRetrieveTimestamp;
+    }
+
+    public void setLastRetrieveTimestamp(Long lastRetrieveTimestamp) {
+        this.lastRetrieveTimestamp = lastRetrieveTimestamp;
     }
 
     public String getProjectName() {
@@ -271,11 +280,45 @@ public class GitLabSCMSource extends AbstractGitSCMSource {
         this.traits = new ArrayList<>(Util.fixNull(traits));
     }
 
+    /**
+     * Saves the current state of this object into a configuration file.
+     *
+     * @throws IOException When saving into the file fails.
+     */
+    private void saveOwner() throws IOException {
+        SCMSourceOwner owner = this.getOwner();
+        if (owner != null) {
+            owner.save();
+        }
+    }
+
+    /**
+     * When the jobDSL plugin is called, one of the retrieve() methods ends up being called.
+     * When those methods fail to communicate with GitLab, the config.xml file corresponding to
+     * the pipeline being analysed is not saved.
+     * Later, the jobDSL only calls those methods to update the configurations when there are
+     * changes to the configuration.
+     * <p/>
+     * Because in the above case, the config didn't change, these retrieve() methods are never
+     * called again.
+     * We force the saving of a timestamp to make sure _something_ is written in the config at
+     * all times (and the jobDSL plugin doesn't see it as being unnecessary to resync)
+     * and future reattempts are allowed.
+     *
+     * @throws IOException When saving into the file fails.
+     */
+    private void saveTimestampInOwner() throws IOException {
+        setLastRetrieveTimestamp(System.currentTimeMillis());
+        saveOwner();
+    }
+
     @Override
-    protected SCMRevision retrieve(@NonNull SCMHead head, @NonNull TaskListener listener)
-            throws IOException, InterruptedException {
+    protected SCMRevision retrieve(@NonNull SCMHead head, @NonNull TaskListener listener) throws IOException {
+        saveTimestampInOwner();
+
+        GitLabApi gitLabApi = apiBuilder(this.getOwner(), serverName);
+
         try {
-            GitLabApi gitLabApi = apiBuilder(this.getOwner(), serverName);
             getGitlabProject(gitLabApi);
             if (head instanceof BranchSCMHead) {
                 listener.getLogger().format("Querying the current revision of branch %s...%n", head.getName());
@@ -336,6 +379,8 @@ public class GitLabSCMSource extends AbstractGitSCMSource {
             SCMHeadEvent<?> event,
             @NonNull TaskListener listener)
             throws IOException, InterruptedException {
+        saveTimestampInOwner();
+
         GitLabApi gitLabApi = apiBuilder(this.getOwner(), serverName);
         try {
             getGitlabProject(gitLabApi);
@@ -595,10 +640,7 @@ public class GitLabSCMSource extends AbstractGitSCMSource {
             LOGGER.log(Level.WARNING, "Exception caught:" + e, e);
             throw new IOException("Failed to fetch latest heads", e);
         } finally {
-            SCMSourceOwner owner = this.getOwner();
-            if (owner != null) {
-                owner.save();
-            }
+            saveOwner();
         }
     }
 
@@ -624,6 +666,8 @@ public class GitLabSCMSource extends AbstractGitSCMSource {
     @NonNull
     @Override
     protected List<Action> retrieveActions(SCMSourceEvent event, @NonNull TaskListener listener) throws IOException {
+        saveTimestampInOwner();
+
         List<Action> result = new ArrayList<>();
         try {
             getGitlabProject();
@@ -647,6 +691,8 @@ public class GitLabSCMSource extends AbstractGitSCMSource {
     @Override
     protected List<Action> retrieveActions(@NonNull SCMHead head, SCMHeadEvent event, @NonNull TaskListener listener)
             throws IOException {
+        saveTimestampInOwner();
+
         try {
             getGitlabProject();
         } catch (GitLabApiException e) {
